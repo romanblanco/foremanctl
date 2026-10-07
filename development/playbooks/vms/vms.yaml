@@ -12,6 +12,8 @@
             cmd: "vagrant up {{ vms | default('quadlet client') }}"
           args:
             chdir: "{{ inventory_dir }}/../"
+          environment:
+            FOREMANCTL_DISABLE_SYNC: "{{ lookup('ansible.builtin.env', 'FOREMANCTL_DISABLE_SYNC', default='false') }}"
           register: vagrant_up
           changed_when: false
           until: >-
@@ -32,6 +34,8 @@
             cmd: "vagrant provision {{ vms | default() }}"
           args:
             chdir: "{{ inventory_dir }}/../"
+          environment:
+            FOREMANCTL_DISABLE_SYNC: "{{ lookup('ansible.builtin.env', 'FOREMANCTL_DISABLE_SYNC', default='false') }}"
           changed_when: false
 
         - name: Create local_vagrant inventory

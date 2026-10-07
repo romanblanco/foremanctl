@@ -18,4 +18,8 @@ export ANSIBLE_LOG_PATH ANSIBLE_COLLECTIONS_PATH ANSIBLE_COLLECTIONS_SCAN_SYS_PA
 
 unset http_proxy HTTP_PROXY https_proxy HTTPS_PROXY
 
-exec obsah "$@"
+OBSAH_BIN=${OBSAH_BIN:-${OBSAH_BASE}/.venv/bin/obsah}
+if [[ ! -x "$OBSAH_BIN" ]]; then
+  OBSAH_BIN=obsah
+fi
+exec "$OBSAH_BIN" "$@"

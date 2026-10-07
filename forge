@@ -12,4 +12,8 @@ ANSIBLE_COLLECTIONS_PATH=${OBSAH_BASE}/build/collections/forge
 ANSIBLE_COLLECTIONS_SCAN_SYS_PATH=false
 export ANSIBLE_COLLECTIONS_PATH ANSIBLE_COLLECTIONS_SCAN_SYS_PATH
 
-exec obsah "$@"
+OBSAH_BIN=${OBSAH_BIN:-${OBSAH_BASE}/.venv/bin/obsah}
+if [[ ! -x "$OBSAH_BIN" ]]; then
+  OBSAH_BIN=obsah
+fi
+exec "$OBSAH_BIN" "$@"

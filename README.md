@@ -1,3 +1,48 @@
+# [DEBUG] To deploy Compliance:
+
+## Fresh clone + deploy
+
+```
+git clone -b add-iop-compliance-debug
+git@github.com:romanblanco/foremanctl.git foremanctl && \
+cd foremanctl && \
+./setup-environment && \
+FOREMANCTL_DISABLE_SYNC=true \
+FOREMANCTL_QUADLET_MEMORY=20480 \
+FOREMANCTL_QUADLET_CPUS=4 \
+FOREMANCTL_QUADLET_DISK=90 \
+./forge vms start --vms quadlet && \
+./foremanctl deploy \
+  --tuning development \
+  --add-feature iop \
+  --initial-admin-username admin \
+  --initial-admin-password changeme \
+  --initial-organization 'Default Organization' \
+  --initial-location 'Default Location'
+```
+
+## Access
+
+Get the current IP:
+```
+grep ansible_host inventories/local_vagrant
+# or: virsh domifaddr foremanctl_quadlet
+```
+Map it in `/etc/hosts` (use the current IP):
+```
+192.168.122.183 quadlet.example.com
+```
+
+Then open `https://quadlet.example.com` and log in with `admin` / `changeme`.
+
+## Destroy
+
+```
+./forge vms stop
+```
+
+---
+
 # Foreman deployment using Podman and Ansible
 
 This repository provides tooling for a deployment of Foreman and Katello using Podman quadlets and Ansible.

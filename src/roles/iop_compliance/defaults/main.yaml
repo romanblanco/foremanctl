@@ -1,8 +1,8 @@
 ---
-iop_compliance_container_image: "quay.io/iop/compliance-backend"
-iop_compliance_container_tag: "foreman-5.0"
+iop_compliance_container_image: "quay.io/rblanco/iop-lab-backend"
+iop_compliance_container_tag: "20261007"
 iop_compliance_ssg_container_image: "quay.io/iop/compliance-ssg"
-iop_compliance_ssg_container_tag: "foreman-5.0"
+iop_compliance_ssg_container_tag: "sha-d2e1f98"
 
 iop_compliance_database_volumes: []
 

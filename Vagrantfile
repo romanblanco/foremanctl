@@ -13,7 +13,11 @@ def set_centos_box_url(vm)
 end
 
 Vagrant.configure("2") do |config|
-  config.vm.synced_folder ".", "/vagrant"
+  if ENV.fetch('FOREMANCTL_DISABLE_SYNC', 'false') == 'true'
+    config.vm.synced_folder ".", "/vagrant", disabled: true
+  else
+    config.vm.synced_folder ".", "/vagrant"
+  end
 
   config.vm.provision("etc_hosts", type: 'ansible') do |ansible|
     ansible.playbook = "development/playbooks/etc_host.yml"

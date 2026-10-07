@@ -1,0 +1,363 @@
+---
+# ===========================================================================
+# iop-compliance-scan  (DEBUG / lab testing only — NOT an installer)
+# ===========================================================================
+# Replicates the iop-debug flow with NO shipped/local artifacts, so colleagues
+# can run it from a clean checkout:
+#   provision RHEL9 client (public box, runtime boxes.yaml) -> register
+#   -> create+assign compliance policy (v2 API) -> scan -> fetch report.
+#
+# The compliance API is reached by `podman exec`-ing curl inside the backend
+# container on the server host. DISABLE_RBAC=true -> a well-formed User
+# x-rh-identity is enough; no RBAC/UI/CSRF. (Verified live.)
+#
+# Run (needs the server host `quadlet` in the inventory):
+#   ANSIBLE_COLLECTIONS_PATH="$PWD/build/collections/forge:$PWD/build/collections/foremanctl" \
+#   ansible-playbook -i inventories/local_vagrant \
+#     development/playbooks/iop-compliance-scan/iop-compliance-scan.yaml \
+#     -e @development/playbooks/iop-compliance-scan/vars/example.yaml
+#
+# Prerequisites that are NOT auto-provisioned (inherent to genuine RHEL content):
+#   - VPN to the Red Hat build mirror for signed SSG/scanner/insights RPMs.
+#   - An activation key + content on the server ({{ iop_activation_key }}).
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# Play 1 — Provision the RHEL9 client from a public box (no local files)
+# ---------------------------------------------------------------------------
+- name: Provision RHEL9 client
+  hosts: localhost
+  gather_facts: false
+  vars_files:
+    - vars/example.yaml
+  vars:
+    iop_repo_root: "{{ (playbook_dir ~ '/../../..') | realpath }}"
+  tasks:
+    - name: Read existing boxes.yaml (if any)
+      ansible.builtin.slurp:
+        src: "{{ iop_repo_root }}/boxes.yaml"
+      register: _iop_boxes_raw
+      failed_when: false
+
+    - name: Merge rhel9-client into boxes.yaml
+      ansible.builtin.copy:
+        dest: "{{ iop_repo_root }}/boxes.yaml"
+        mode: "0644"
+        content: >-
+          {{ ((_iop_boxes_raw.content | default('') | b64decode | from_yaml) or {})
+             | combine({iop_rhel9_inventory_host: {
+                 'box': iop_rhel9_box,
+                 'memory': iop_rhel9_memory,
+                 'cpus': iop_rhel9_cpus,
+                 'disk_size': iop_rhel9_disk}})
+             | to_nice_yaml }}
+
+    # --no-provision: skip the stock etc_hosts/disk_resize provisioners. They
+    # assume a box with working repos (cloud-utils-growpart); an unregistered
+    # generic/rhel9 has none. Play 2 sets /etc/hosts; disk resize is unneeded.
+    - name: Vagrant up the RHEL9 client  # noqa: no-changed-when
+      ansible.builtin.command: "vagrant up {{ iop_rhel9_inventory_host }} --no-provision"
+      args:
+        chdir: "{{ iop_repo_root }}"
+      environment:
+        FOREMANCTL_DISABLE_SYNC: "true"
+
+    - name: Read client ssh-config
+      ansible.builtin.command: "vagrant ssh-config {{ iop_rhel9_inventory_host }}"
+      args:
+        chdir: "{{ iop_repo_root }}"
+      register: _iop_sshcfg
+      changed_when: false
+
+    - name: Register client in the in-memory inventory
+      ansible.builtin.add_host:
+        name: "{{ iop_rhel9_inventory_host }}"
+        ansible_host: "{{ _iop_sshcfg.stdout | regex_search('HostName (.+)', '\\1') | first }}"
+        ansible_port: "{{ _iop_sshcfg.stdout | regex_search('Port (.+)', '\\1') | first }}"
+        ansible_user: "{{ _iop_sshcfg.stdout | regex_search('User (.+)', '\\1') | first }}"
+        ansible_ssh_private_key_file: "{{ _iop_sshcfg.stdout | regex_search('IdentityFile (.+)', '\\1') | first }}"
+        ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes"
+
+# ---------------------------------------------------------------------------
+# Play 2 — Client: hostname, resolve server, install scanner/SSG, register
+# ---------------------------------------------------------------------------
+- name: Prepare and register RHEL9 client
+  hosts: "{{ iop_rhel9_inventory_host }}"
+  become: true
+  gather_facts: true
+  vars_files:
+    - vars/example.yaml
+  vars:
+    _f: "https://{{ iop_server_fqdn }}/api"
+    _k: "https://{{ iop_server_fqdn }}/katello/api"
+    _org_id: "{{ _iop_org.json.results[0].id | default('') }}"
+  tasks:
+    - name: Set client hostname
+      ansible.builtin.hostname:
+        name: "{{ iop_rhel9_hostname }}"
+
+    - name: Point client at the IoP server
+      ansible.builtin.lineinfile:
+        path: /etc/hosts
+        regexp: '\s{{ iop_server_fqdn | regex_escape }}(\s|$)'
+        line: "{{ iop_server_address }} {{ iop_server_fqdn }} {{ iop_server_host }}"
+
+    - name: Import Red Hat release GPG key
+      ansible.builtin.rpm_key:
+        key: "{{ iop_redhat_gpg_key_url }}"
+        state: present
+      when: iop_redhat_gpg_key_url | length > 0
+
+    - name: Copy internal mirror CA to the client trust store
+      ansible.builtin.copy:
+        src: "{{ iop_mirror_cacert_src }}"
+        dest: /etc/pki/ca-trust/source/anchors/iop-mirror-ca.crt
+        mode: "0644"
+      when: iop_mirror_cacert_src | length > 0
+      notify: Update CA trust
+
+    - name: Flush CA trust update
+      ansible.builtin.meta: flush_handlers
+
+    # Temporary compose repos so dnf resolves scanner/insights + deps.
+    # gpgcheck stays on; generic/rhel9 ships no repos of its own.
+    - name: Configure temporary mirror repos
+      ansible.builtin.yum_repository:
+        name: "iop-lab-{{ item.name }}"
+        description: "IoP lab {{ item.name }} (temporary)"
+        baseurl: "{{ item.url }}"
+        gpgcheck: true
+        gpgkey: "{{ iop_redhat_gpg_key_url }}"
+        enabled: true
+      loop:
+        - { name: baseos, url: "{{ iop_mirror_baseos_url }}" }
+        - { name: appstream, url: "{{ iop_mirror_appstream_url }}" }
+      when: iop_mirror_baseos_url | length > 0
+
+    - name: Install SSG (pinned URL) + scanner + insights-client
+      ansible.builtin.dnf:
+        name: "{{ ([iop_ssg_rpm_url] | select | list) + iop_scan_packages }}"
+        state: present
+        disable_gpg_check: false
+
+    - name: Look up organization id
+      ansible.builtin.uri:
+        url: "{{ _f }}/organizations?search={{ iop_organization | urlencode }}"
+        user: "{{ iop_server_admin_user }}"
+        password: "{{ iop_server_admin_password }}"
+        force_basic_auth: true
+        validate_certs: false
+      delegate_to: localhost
+      become: false
+      register: _iop_org
+
+    - name: Look up location id
+      ansible.builtin.uri:
+        url: "{{ _f }}/locations?search={{ iop_location | urlencode }}"
+        user: "{{ iop_server_admin_user }}"
+        password: "{{ iop_server_admin_password }}"
+        force_basic_auth: true
+        validate_certs: false
+      delegate_to: localhost
+      become: false
+      register: _iop_loc
+
+    # Newer Katello ties activation keys to a content_view_environment (CVE),
+    # not separate environment_id/content_view_id (those are ignored).
+    - name: Look up content view environment id
+      ansible.builtin.uri:
+        url: "{{ _k }}/content_view_environments?organization_id={{ _org_id }}"
+        user: "{{ iop_server_admin_user }}"
+        password: "{{ iop_server_admin_password }}"
+        force_basic_auth: true
+        validate_certs: false
+      delegate_to: localhost
+      become: false
+      register: _iop_cve
+
+    - name: Resolve CVE id (Library + default content view)
+      ansible.builtin.set_fact:
+        iop_cve_id: >-
+          {{ (_iop_cve.json.results
+              | selectattr('environment.name', 'equalto', iop_lifecycle_environment)
+              | selectattr('content_view.name', 'equalto', iop_content_view)
+              | map(attribute='id') | first) }}
+
+    - name: Check for existing activation key
+      ansible.builtin.uri:
+        url: "{{ _k }}/activation_keys?organization_id={{ _org_id }}&search={{ iop_activation_key | urlencode }}"
+        user: "{{ iop_server_admin_user }}"
+        password: "{{ iop_server_admin_password }}"
+        force_basic_auth: true
+        validate_certs: false
+      delegate_to: localhost
+      become: false
+      register: _iop_ak_check
+
+    - name: Create activation key (Library + default content view)
+      ansible.builtin.uri:
+        url: "{{ _k }}/activation_keys"
+        method: POST
+        user: "{{ iop_server_admin_user }}"
+        password: "{{ iop_server_admin_password }}"
+        force_basic_auth: true
+        validate_certs: false
+        body_format: json
+        body:
+          organization_id: "{{ _org_id }}"
+          name: "{{ iop_activation_key }}"
+          content_view_environment_ids: "{{ [iop_cve_id | int] }}"
+          unlimited_hosts: true
+        status_code: [200, 201]
+      delegate_to: localhost
+      become: false
+      when: _iop_ak_check.json.total | int == 0
+
+    - name: Request a registration command from Foreman
+      ansible.builtin.uri:
+        url: "{{ _f }}/registration_commands"
+        method: POST
+        user: "{{ iop_server_admin_user }}"
+        password: "{{ iop_server_admin_password }}"
+        force_basic_auth: true
+        validate_certs: false
+        body_format: json
+        body:
+          registration_command:
+            organization_id: "{{ _org_id }}"
+            location_id: "{{ _iop_loc.json.results[0].id }}"
+            activation_keys: "{{ [iop_activation_key] if (iop_activation_key | length > 0) else omit }}"
+            insecure: true
+            setup_insights: true
+        status_code: [200, 201]
+      delegate_to: localhost
+      become: false
+      register: _iop_regcmd
+
+    - name: Run the registration command on the client  # noqa: command-instead-of-shell
+      ansible.builtin.shell: "{{ _iop_regcmd.json.registration_command }}"  # curl | bash pipe
+      register: _iop_register
+      changed_when: true
+      # guard: stock insights snippet runs `yum install` with no repos
+      failed_when: _iop_register.rc != 0 and 'already registered' not in _iop_register.stdout
+
+    - name: Register with Insights (upload inventory archive)
+      ansible.builtin.command: insights-client --register
+      register: _iop_insights
+      changed_when: "'Successfully' in _iop_insights.stdout"
+  handlers:
+    - name: Update CA trust
+      ansible.builtin.command: update-ca-trust
+      changed_when: true
+
+# ---------------------------------------------------------------------------
+# Play 3 — Server: resolve org_id + uuid, create policy, assign host
+# ---------------------------------------------------------------------------
+- name: Create and assign compliance policy
+  hosts: "{{ iop_server_host }}"
+  become: true
+  gather_facts: false
+  vars_files:
+    - vars/example.yaml
+  vars:
+    _api: "http://localhost:8000/api/compliance/v2"
+    _exec: "podman exec {{ iop_compliance_container }}"
+    ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes"
+  tasks:
+    - name: Resolve org_id and system uuid from HBI
+      ansible.builtin.command: >-
+        podman exec {{ iop_postgres_container }}
+        psql -U postgres -d {{ iop_hbi_database }} -At -F '|'
+        -c "SELECT id, org_id FROM {{ iop_hbi_schema }}.hosts
+            WHERE display_name = '{{ iop_rhel9_hostname }}' LIMIT 1;"
+      register: _iop_hbi
+      changed_when: false
+      retries: 30
+      delay: 10
+      until: _iop_hbi.stdout | length > 0
+
+    - name: Set system facts
+      ansible.builtin.set_fact:
+        iop_system_uuid: "{{ _iop_hbi.stdout.split('|')[0] }}"
+        iop_resolved_org_id: "{{ iop_org_id if (iop_org_id | length > 0) else _iop_hbi.stdout.split('|')[1] }}"
+
+    - name: Build x-rh-identity header
+      ansible.builtin.set_fact:
+        iop_identity_b64: >-
+          {{ {'identity': {'org_id': iop_resolved_org_id, 'type': 'User',
+                           'auth_type': 'basic-auth',
+                           'user': {'username': 'iop-lab', 'is_active': true,
+                                    'is_org_admin': true}},
+              'entitlements': {'insights': {'is_entitled': true}}}
+             | to_json | b64encode }}
+
+    - name: Create compliance policy
+      ansible.builtin.command: >-
+        {{ _exec }} curl -sS -X POST "{{ _api }}/policies"
+        -H "X-RH-IDENTITY: {{ iop_identity_b64 }}"
+        -H "Content-Type: application/vnd.api+json"
+        -d '{{ {"title": iop_policy_title,
+                "profile_id": iop_policy_profile_id,
+                "compliance_threshold": iop_policy_compliance_threshold} | to_json }}'
+      register: _iop_policy_create
+      changed_when: true
+
+    - name: Extract policy id
+      ansible.builtin.set_fact:
+        iop_policy_id: "{{ (_iop_policy_create.stdout | from_json).data.id }}"
+
+    - name: Assign host to policy
+      ansible.builtin.command: >-
+        {{ _exec }} curl -sS -X PATCH
+        "{{ _api }}/policies/{{ iop_policy_id }}/systems/{{ iop_system_uuid }}"
+        -H "X-RH-IDENTITY: {{ iop_identity_b64 }}"
+        -H "Content-Type: application/vnd.api+json"
+      register: _iop_assign
+      changed_when: true
+
+# ---------------------------------------------------------------------------
+# Play 4 — Client: run the OpenSCAP scan (uploads via ingress)
+# ---------------------------------------------------------------------------
+- name: Run compliance scan
+  hosts: "{{ iop_rhel9_inventory_host }}"
+  become: true
+  gather_facts: false
+  vars_files:
+    - vars/example.yaml
+  tasks:
+    - name: Run insights-client compliance scan
+      ansible.builtin.command: insights-client --compliance
+      register: _iop_scan
+      changed_when: true
+
+    - name: Scan output
+      ansible.builtin.debug:
+        var: _iop_scan.stdout_lines
+
+# ---------------------------------------------------------------------------
+# Play 5 — Server: fetch the resulting report
+# ---------------------------------------------------------------------------
+- name: Fetch compliance report
+  hosts: "{{ iop_server_host }}"
+  become: true
+  gather_facts: false
+  vars_files:
+    - vars/example.yaml
+  vars:
+    _api: "http://localhost:8000/api/compliance/v2"
+    _exec: "podman exec {{ iop_compliance_container }}"
+    ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes"
+  tasks:
+    - name: Poll policy for reported systems / score
+      ansible.builtin.command: >-
+        {{ _exec }} curl -sS "{{ _api }}/policies/{{ iop_policy_id }}"
+        -H "X-RH-IDENTITY: {{ iop_identity_b64 }}"
+      register: _iop_report
+      changed_when: false
+      retries: 30
+      delay: 10
+      until: (_iop_report.stdout | from_json).data.total_system_count | default(0) | int > 0
+
+    - name: Report
+      ansible.builtin.debug:
+        var: _iop_report.stdout

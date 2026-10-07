@@ -1,0 +1,76 @@
+---
+# Variables for the iop-compliance-scan lab playbook.
+# Copy + edit, pass with: -e @path/to/your-vars.yaml
+#
+# DEBUG / lab testing only. No local/shipped artifacts: the RHEL9 box is pulled
+# from a public box name, the SSH key + inventory are generated at runtime, and
+# client packages come from URLs. Colleagues need only network access (and VPN
+# for the Red Hat build mirror where the signed RPMs live).
+
+# --- Foreman / server (from `./forge vms start` + deploy) -------------------
+iop_server_host: quadlet
+iop_server_fqdn: quadlet.example.com
+# Current VM IP (inventories/local_vagrant ansible_host). The client resolves
+# the server via this.
+iop_server_address: "192.168.122.183"
+iop_server_admin_user: admin
+iop_server_admin_password: changeme
+
+# Container + DB names on the server (internal database_mode).
+iop_compliance_container: iop-service-compliance-backend-api
+iop_postgres_container: postgresql
+iop_hbi_database: inventory_db
+iop_hbi_schema: hbi
+
+# --- RHEL9 client VM (public box, no shipped files) -------------------------
+iop_rhel9_hostname: rhel9-client.example.com
+iop_rhel9_inventory_host: rhel9-client
+# Public RHEL9 libvirt box (Vagrant Cloud) — reproducible, no VPN for the box.
+# Override with a compose-built box name for exact-minor validation if needed.
+iop_rhel9_box: "generic/rhel9"
+iop_rhel9_memory: 2048
+iop_rhel9_cpus: 2
+iop_rhel9_disk: 20
+
+# --- Client packages (signed, from the RHEL9 compose mirror; VPN) -----------
+# Match SSG to the server's imported content (currently 0.1.81). Installed by
+# URL (no repo needed). Leave a URL empty to rely on activation-key content
+# repos instead.
+# SSG pinned by URL to match the server's imported content (0.1.81).
+iop_ssg_rpm_url: "https://download.devel.redhat.com/rhel-9/nightly/RHEL-9/RHEL-9.9.0-20260624.2/compose/AppStream/x86_64/os/Packages/scap-security-guide-0.1.81-1.el9_8.noarch.rpm"
+# Temporary compose repos so dnf resolves openscap-scanner + insights-client +
+# their deps (generic/rhel9 ships no repos). VPN. gpgcheck stays on.
+iop_mirror_baseos_url: "https://download.devel.redhat.com/rhel-9/nightly/RHEL-9/latest-RHEL-9/compose/BaseOS/x86_64/os"
+iop_mirror_appstream_url: "https://download.devel.redhat.com/rhel-9/nightly/RHEL-9/latest-RHEL-9/compose/AppStream/x86_64/os"
+# CA bundle copied into the client trust store so it trusts the internal mirror
+# TLS (never sslverify=0). Default = the control host's consolidated trust
+# bundle, which already contains the Red Hat IT CA on a RH workstation. Set to
+# a specific CA file if your host bundle lacks it.
+iop_mirror_cacert_src: "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem"
+iop_scan_packages:
+  - openscap-scanner
+  - insights-client
+# Red Hat release GPG key (verify fingerprint 567E347AD0044ADE55BA8A5F199E2F91FD431D51).
+iop_redhat_gpg_key_url: "https://security.access.redhat.com/data/fd431d51.txt"
+
+# --- Registration -----------------------------------------------------------
+# Org/location must exist (deploy creates the defaults). Katello registration
+# requires an activation key; the playbook auto-creates this one (Library +
+# Default Organization View; SCA needs no subscriptions) if it is missing.
+iop_organization: "Default Organization"
+iop_location: "Default Location"
+iop_activation_key: "iop-lab"
+iop_content_view: "Default Organization View"
+iop_lifecycle_environment: "Library"
+
+# --- Policy -----------------------------------------------------------------
+# ANSSI-BP-028 enhanced, RHEL-9, SSG 0.1.81 (verified live on this env).
+# Re-resolve if SSG changes: GET /security_guides -> /{id}/profiles.
+iop_policy_title: "ANSSI enhanced (lab)"
+iop_policy_profile_id: "e4ed65c6-42c8-49ae-893a-c0ff5fdf1a39"
+iop_policy_profile_ref: "xccdf_org.ssgproject.content_profile_anssi_bp28_enhanced"
+iop_policy_os_major: 9
+iop_policy_compliance_threshold: 100
+
+# Set explicitly to skip HBI org_id auto-discovery (play 3).
+iop_org_id: ""

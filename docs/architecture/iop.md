@@ -128,7 +128,7 @@ archive contents eligible for cleanup after 24 hours.
 | remediation | `iop-service-remediations-api` | 3000 (internal) | Remediation playbook generation |
 | vmaas | `iop-service-vmaas-reposcan`, `iop-service-vmaas-webapp-go` | - | Vulnerability metadata and advisory sync |
 | vulnerability | 8 containers (see below) | 8443 (internal) | Vulnerability assessment pipeline |
-| compliance | 6 containers (see below) | 8000 API, 8080 SSG | Compliance API, SSG content, inventory consumer, GoodJob worker, migrations, and periodic SSG import |
+| compliance | 7 containers (see below) | 8000 API, 8080 SSG | Compliance API, SSG content, inventory consumer, GoodJob worker, migration check and migration, and deployment-triggered SSG import |
 
 #### Vulnerability containers
 
@@ -147,12 +147,13 @@ archive contents eligible for cleanup after 24 hours.
 
 | Container | Type | Description |
 |-----------|------|-------------|
+| `iop-service-compliance-db-migration-check` | oneshot | Checks for pending database migrations during deployment |
 | `iop-service-compliance-dbmigrate` | oneshot | Applies pending database migrations during deployment |
-| `iop-service-compliance-backend` | service | Main Compliance API endpoint |
+| `iop-service-compliance-backend-api` | service | Main Compliance API endpoint |
 | `iop-service-compliance-ssg` | service | SSG content server |
 | `iop-service-compliance-inventory-consumer` | service | Consumes inventory events |
 | `iop-service-compliance-goodjob` | service | GoodJob background worker |
-| `iop-service-compliance-import-ssg` | oneshot | Imports SSG datastreams and remediation playbooks during deployment after the SSG image is refreshed |
+| `iop-service-compliance-import-ssg` | oneshot | Imports SSG datastreams and remediation playbooks during deployment |
 
 ### Network
 

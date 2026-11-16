@@ -87,7 +87,7 @@
 
 - name: Deploy Compliance Backend API Container
   containers.podman.podman_container:
-    name: iop-service-compliance-backend
+    name: iop-service-compliance-backend-api
     image: iop-compliance.image
     state: quadlet
     network: "{{ foreman_core_network_container_networks }}"
@@ -108,11 +108,13 @@
         [Unit]
         Description=Compliance Service
         PartOf=foreman.target
-        After=iop-service-compliance-dbmigrate.service
+        Wants=postgresql.service iop-core-kafka.service
+        After=postgresql.service iop-core-kafka.service iop-service-compliance-dbmigrate.service
         [Service]
         Restart=on-failure
         [Install]
         WantedBy=default.target foreman.target
+  notify: Restart compliance
 
 - name: Deploy Compliance SSG Container
   containers.podman.podman_container:
@@ -152,12 +154,14 @@
       - |
         [Unit]
         Description=Compliance Inventory Consumer Service
-        After=iop-core-kafka.service
+        Wants=postgresql.service iop-core-kafka.service
+        After=postgresql.service iop-core-kafka.service
         PartOf=foreman.target
         [Service]
         Restart=on-failure
         [Install]
         WantedBy=default.target foreman.target
+  notify: Restart compliance
 
 - name: Deploy Compliance GoodJob Worker Container
   containers.podman.podman_container:
@@ -177,10 +181,13 @@
         [Unit]
         Description=Compliance GoodJob Worker
         PartOf=foreman.target
+        Wants=postgresql.service iop-core-kafka.service
+        After=postgresql.service iop-core-kafka.service
         [Service]
         Restart=on-failure
         [Install]
         WantedBy=default.target foreman.target
+  notify: Restart compliance
 
 - name: Deploy Compliance Import SSG Container
   containers.podman.podman_container:
@@ -200,7 +207,8 @@
         [Unit]
         Description=Compliance Import SSG Job
         Requires=iop-service-compliance-ssg.service
-        After=iop-service-compliance-ssg.service
+        Wants=postgresql.service
+        After=postgresql.service iop-service-compliance-ssg.service
         [Service]
         Type=oneshot
 
@@ -236,6 +244,15 @@
 
 - name: Flush handlers to restart services
   ansible.builtin.meta: flush_handlers
+
+- name: Start Compliance services
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    state: started
+  loop:
+    - iop-service-compliance-backend-api
+    - iop-service-compliance-inventory-consumer
+    - iop-service-compliance-goodjob
 
 - name: Restart Compliance SSG service before importing content
   ansible.builtin.systemd:

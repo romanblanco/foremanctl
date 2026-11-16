@@ -1,5 +1,14 @@
+def systemd_properties(result):
+    properties = {}
+    for line in result.stdout.splitlines():
+        if "=" in line:
+            name, value = line.split("=", 1)
+            properties[name] = value.split()
+    return properties
+
+
 def test_compliance_backend_api_service(server):
-    service = server.service("iop-service-compliance-backend")
+    service = server.service("iop-service-compliance-backend-api")
     assert service.is_running
     assert service.is_enabled
 
@@ -39,10 +48,24 @@ def test_compliance_db_migration_check_quadlet_file(server):
     assert "TimeoutStartSec=30m" in quadlet_file.content_string
 
 
-def test_compliance_api_container(server):
-    result = server.run("podman ps --format '{{.Names}}' | grep iop-service-compliance-backend")
+def test_compliance_migration_check_dependencies(server):
+    result = server.run(
+        "systemctl show iop-service-compliance-db-migration-check "
+        "--property=After --property=Wants"
+    )
     assert result.succeeded
-    assert "iop-service-compliance-backend" in result.stdout
+    properties = systemd_properties(result)
+    for dependency in ("postgresql.service", "iop-core-kafka.service"):
+        assert dependency in properties["After"]
+        assert dependency in properties["Wants"]
+
+
+def test_compliance_api_container(server):
+    result = server.run(
+        "podman ps --format '{{.Names}}' | grep iop-service-compliance-backend-api"
+    )
+    assert result.succeeded
+    assert "iop-service-compliance-backend-api" in result.stdout
 
 
 def test_compliance_ssg_container(server):
@@ -52,28 +75,68 @@ def test_compliance_ssg_container(server):
 
 
 def test_compliance_api_quadlet_file(server):
-    quadlet_file = server.file("/etc/containers/systemd/iop-service-compliance-backend.container")
+    quadlet_file = server.file(
+        "/etc/containers/systemd/iop-service-compliance-backend-api.container"
+    )
     assert quadlet_file.exists
     assert quadlet_file.is_file
 
 
-def test_compliance_api_service_is_ordered_after_migrations(server):
-    result = server.run("systemctl show iop-service-compliance-backend --property=After")
+def test_compliance_api_service_dependencies(server):
+    result = server.run(
+        "systemctl show iop-service-compliance-backend-api --property=After --property=Wants"
+    )
     assert result.succeeded
-    assert "iop-service-compliance-dbmigrate.service" in result.stdout
+    properties = systemd_properties(result)
+    assert "iop-service-compliance-dbmigrate.service" in properties["After"]
+    for dependency in ("postgresql.service", "iop-core-kafka.service"):
+        assert dependency in properties["After"]
+        assert dependency in properties["Wants"]
 
 
 def test_compliance_dbmigrate_service_dependencies(server):
-    result = server.run("systemctl show iop-service-compliance-dbmigrate --property=After")
+    result = server.run(
+        "systemctl show iop-service-compliance-dbmigrate --property=After --property=Wants"
+    )
     assert result.succeeded
-    assert "postgresql.service" in result.stdout
-    assert "iop-core-kafka.service" in result.stdout
+    properties = systemd_properties(result)
+    for dependency in ("postgresql.service", "iop-core-kafka.service"):
+        assert dependency in properties["After"]
+        assert dependency in properties["Wants"]
 
 
 def test_compliance_inventory_consumer_dependencies(server):
-    result = server.run("systemctl show iop-service-compliance-inventory-consumer --property=After")
+    result = server.run(
+        "systemctl show iop-service-compliance-inventory-consumer "
+        "--property=After --property=Wants"
+    )
     assert result.succeeded
-    assert "iop-core-kafka.service" in result.stdout
+    properties = systemd_properties(result)
+    for dependency in ("postgresql.service", "iop-core-kafka.service"):
+        assert dependency in properties["After"]
+        assert dependency in properties["Wants"]
+
+
+def test_compliance_goodjob_dependencies(server):
+    result = server.run(
+        "systemctl show iop-service-compliance-goodjob --property=After --property=Wants"
+    )
+    assert result.succeeded
+    properties = systemd_properties(result)
+    for dependency in ("postgresql.service", "iop-core-kafka.service"):
+        assert dependency in properties["After"]
+        assert dependency in properties["Wants"]
+
+
+def test_compliance_ssg_import_dependencies(server):
+    result = server.run(
+        "systemctl show iop-service-compliance-import-ssg --property=After --property=Wants"
+    )
+    assert result.succeeded
+    properties = systemd_properties(result)
+    assert "postgresql.service" in properties["After"]
+    assert "postgresql.service" in properties["Wants"]
+    assert "iop-service-compliance-ssg.service" in properties["After"]
 
 
 def test_compliance_database_secrets(server):
